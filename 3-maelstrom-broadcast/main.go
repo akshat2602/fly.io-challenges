@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -36,17 +38,20 @@ var logger = log.New(os.Stderr, "", 0)
 // TODO: Add worker shutting down logic later
 
 func (b *broadcaster) bWorkers(node *maelstrom.Node) {
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 50; i++ {
 		go func() {
 			for {
 				bmsg := <-b.broadcastChan
 				for {
-					err := node.Send(bmsg.dst, bmsg.body)
+					logger.Printf("Sending broadcast message %v to: %s", bmsg.body, bmsg.dst)
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					_, err := node.SyncRPC(ctx, bmsg.dst, bmsg.body)
+					cancel()
+					logger.Printf("err: %v", err)
 					if err != nil {
 						continue
-					} else {
-						break
 					}
+					break
 				}
 			}
 		}()
@@ -100,6 +105,10 @@ func (s *server) handleBroadcast(msg maelstrom.Message) error {
 		return err
 	}
 
+	go func() {
+		_ = s.node.Reply(msg, map[string]any{"type": "broadcast_ok"})
+	}()
+
 	logger.Printf("Broadcast request received: %v", body)
 	s.messageLock.Lock()
 	defer s.messageLock.Unlock()
@@ -110,13 +119,8 @@ func (s *server) handleBroadcast(msg maelstrom.Message) error {
 	s.broadcastData[body["message"].(float64)] = struct{}{}
 	s.pendingBroadcasts <- int(body["message"].(float64))
 
-	// Check for a message id in the body before replying
-	if _, ok := body["msg_id"]; !ok {
-		return nil
-	}
-
 	logger.Printf("Added message to local state")
-	return s.node.Reply(msg, map[string]any{"type": "broadcast_ok"})
+	return nil
 }
 
 func (s *server) handleTopology(msg maelstrom.Message) error {
@@ -135,11 +139,11 @@ func main() {
 	s := &server{
 		node:              n,
 		topology:          map[string][]string{},
-		pendingBroadcasts: make(chan int, 200),
+		pendingBroadcasts: make(chan int, 500),
 		broadcastData:     map[float64]struct{}{},
 	}
 	b := &broadcaster{
-		broadcastChan: make(chan broadcastMsg, 100),
+		broadcastChan: make(chan broadcastMsg, 500),
 	}
 
 	n.Handle("broadcast", s.handleBroadcast)

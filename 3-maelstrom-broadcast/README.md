@@ -7,3 +7,5 @@
 4th problem: concurrent map writes, need to add a 
 
 5th problem: performance
+
+6th problem: Pushing to channel before replying to an RPC was causing issues with timeout XD
