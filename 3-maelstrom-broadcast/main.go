@@ -35,12 +35,12 @@ type topologyMessage struct {
 
 var logger = log.New(os.Stderr, "", 0)
 
-// TODO: Add worker shutting down logic later
-
 func (b *broadcaster) bWorkers(node *maelstrom.Node) {
-	for i := 0; i < 50; i++ {
+	maxRetries := 10
+	for i := 0; i < 10; i++ {
 		go func() {
 			for {
+				attempts := 0
 				bmsg := <-b.broadcastChan
 				for {
 					logger.Printf("Sending broadcast message %v to: %s", bmsg.body, bmsg.dst)
@@ -49,7 +49,14 @@ func (b *broadcaster) bWorkers(node *maelstrom.Node) {
 					cancel()
 					logger.Printf("err: %v", err)
 					if err != nil {
-						continue
+						attempts++
+						if attempts < maxRetries {
+							time.Sleep(time.Duration(attempts) * time.Millisecond * 100)
+							continue
+						} else {
+							logger.Printf("Max retries reached for message %v to: %s", bmsg.body, bmsg.dst)
+							break
+						}
 					}
 					break
 				}
@@ -139,11 +146,11 @@ func main() {
 	s := &server{
 		node:              n,
 		topology:          map[string][]string{},
-		pendingBroadcasts: make(chan int, 500),
+		pendingBroadcasts: make(chan int, 100),
 		broadcastData:     map[float64]struct{}{},
 	}
 	b := &broadcaster{
-		broadcastChan: make(chan broadcastMsg, 500),
+		broadcastChan: make(chan broadcastMsg, 100),
 	}
 
 	n.Handle("broadcast", s.handleBroadcast)
