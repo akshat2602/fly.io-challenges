@@ -37,21 +37,21 @@ var logger = log.New(os.Stderr, "", 0)
 
 func (b *broadcaster) bWorkers(node *maelstrom.Node) {
 	maxRetries := 10
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 50; i++ {
 		go func() {
 			for {
 				attempts := 0
 				bmsg := <-b.broadcastChan
 				for {
 					logger.Printf("Sending broadcast message %v to: %s", bmsg.body, bmsg.dst)
-					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(600))
 					_, err := node.SyncRPC(ctx, bmsg.dst, bmsg.body)
 					cancel()
 					logger.Printf("err: %v", err)
 					if err != nil {
 						attempts++
 						if attempts < maxRetries {
-							time.Sleep(time.Duration(attempts) * time.Millisecond * 100)
+							time.Sleep(time.Duration(attempts) * time.Millisecond * time.Duration(400))
 							continue
 						} else {
 							logger.Printf("Max retries reached for message %v to: %s", bmsg.body, bmsg.dst)
@@ -146,11 +146,11 @@ func main() {
 	s := &server{
 		node:              n,
 		topology:          map[string][]string{},
-		pendingBroadcasts: make(chan int, 100),
+		pendingBroadcasts: make(chan int, 500),
 		broadcastData:     map[float64]struct{}{},
 	}
 	b := &broadcaster{
-		broadcastChan: make(chan broadcastMsg, 100),
+		broadcastChan: make(chan broadcastMsg, 500),
 	}
 
 	n.Handle("broadcast", s.handleBroadcast)

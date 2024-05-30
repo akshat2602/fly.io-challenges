@@ -4,8 +4,11 @@
 
 3rd problem: When and how to clear the channel to ensure no messages are lost. Not really a problem because channels are blocking
 
-4th problem: concurrent map writes, need to add a 
+4th problem: concurrent map writes, need to add a lock
 
 5th problem: performance
 
 6th problem: Pushing to channel before replying to an RPC was causing issues with timeout XD
+
+3e: 
+Need to construct your own topology here because maximum latency can only be 600 ms and each exchange takes 100ms, maximum distance between two nodes by performing DFS comes out to be 8 so a custom topology is needed.
