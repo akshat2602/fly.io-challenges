@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"os"
 	"sync"
@@ -16,23 +15,45 @@ type server struct {
 	pendingBroadcasts chan int
 	broadcastData     map[float64]struct{}
 	// A mutex to lock the broadcastData map
-	messageLock sync.Mutex
+	messageLock sync.RWMutex
 }
 
-type broadcastMessage struct {
-	Type    string `json:"type"`
-	Message int    `json:"message"`
+type broadcaster struct {
+	broadcastChan chan broadcastMsg
+}
+
+type broadcastMsg struct {
+	dst  string
+	body map[string]any
 }
 
 type topologyMessage struct {
 	Topology map[string][]string `json:"topology"`
 }
 
-// Nitpick: Currently using a global logger, should be passed to the server struct
-
 var logger = log.New(os.Stderr, "", 0)
 
-func (s *server) broadcastValues() {
+// TODO: Add worker shutting down logic later
+
+func (b *broadcaster) bWorkers(node *maelstrom.Node) {
+	for i := 0; i < 10; i++ {
+		go func() {
+			for {
+				bmsg := <-b.broadcastChan
+				for {
+					err := node.Send(bmsg.dst, bmsg.body)
+					if err != nil {
+						continue
+					} else {
+						break
+					}
+				}
+			}
+		}()
+	}
+}
+
+func (s *server) broadcastValues(b *broadcaster) {
 	for {
 		nodeID := s.node.ID()
 		neighbors := s.topology[nodeID]
@@ -43,33 +64,14 @@ func (s *server) broadcastValues() {
 		logger.Printf("Waiting for pending broadcasts")
 		message := <-s.pendingBroadcasts
 
-		logger.Printf("Broadcasting message: %d to neighbors: %v", message, neighbors)
-
-		msg := broadcastMessage{
-			Type:    "broadcast",
-			Message: message,
-		}
-		// Convert the message to bytes
-		msgBytes, err := json.Marshal(msg)
-		if err != nil {
-			logger.Printf("Error marshalling message: %v", err)
-			continue
-		}
-		// Create a raw message
-		bmsg := json.RawMessage(msgBytes)
 		for _, address := range neighbors {
-			logger.Printf("Broadcasting message to %s: %v", address, msg)
-			s.node.RPC(address, bmsg, func(msg maelstrom.Message) error {
-				var body map[string]interface{}
-				if err := json.Unmarshal(msg.Body, &body); err != nil {
-					return err
-				}
-				if body["type"] != "broadcast_ok" {
-					return errors.New("unexpected response type")
-				}
-				logger.Printf("Broadcast response received: %v", body)
-				return nil
-			})
+			b.broadcastChan <- broadcastMsg{
+				dst: address,
+				body: map[string]any{
+					"type":    "broadcast",
+					"message": message,
+				},
+			}
 		}
 	}
 }
@@ -103,10 +105,15 @@ func (s *server) handleBroadcast(msg maelstrom.Message) error {
 	defer s.messageLock.Unlock()
 	if _, exists := s.broadcastData[body["message"].(float64)]; exists {
 		logger.Printf("Message already exists in local state")
-		return s.node.Reply(msg, map[string]any{"type": "broadcast_ok"})
+		return nil
 	}
 	s.broadcastData[body["message"].(float64)] = struct{}{}
 	s.pendingBroadcasts <- int(body["message"].(float64))
+
+	// Check for a message id in the body before replying
+	if _, ok := body["msg_id"]; !ok {
+		return nil
+	}
 
 	logger.Printf("Added message to local state")
 	return s.node.Reply(msg, map[string]any{"type": "broadcast_ok"})
@@ -128,15 +135,19 @@ func main() {
 	s := &server{
 		node:              n,
 		topology:          map[string][]string{},
-		pendingBroadcasts: make(chan int, 10),
+		pendingBroadcasts: make(chan int, 200),
 		broadcastData:     map[float64]struct{}{},
+	}
+	b := &broadcaster{
+		broadcastChan: make(chan broadcastMsg, 100),
 	}
 
 	n.Handle("broadcast", s.handleBroadcast)
 	n.Handle("read", s.handleRead)
 	n.Handle("topology", s.handleTopology)
 
-	go s.broadcastValues()
+	go s.broadcastValues(b)
+	b.bWorkers(n)
 
 	if err := n.Run(); err != nil {
 		logger.Fatal(err)
