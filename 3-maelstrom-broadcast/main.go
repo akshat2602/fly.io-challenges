@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -17,7 +18,8 @@ type server struct {
 	pendingBroadcasts chan int
 	broadcastData     map[float64]struct{}
 	// A mutex to lock the broadcastData map
-	messageLock sync.RWMutex
+	messageLock  sync.RWMutex
+	topologyLock sync.RWMutex
 }
 
 type broadcaster struct {
@@ -36,8 +38,8 @@ type topologyMessage struct {
 var logger = log.New(os.Stderr, "", 0)
 
 func (b *broadcaster) bWorkers(node *maelstrom.Node) {
-	maxRetries := 10
-	for i := 0; i < 50; i++ {
+	maxRetries := 100
+	for i := 0; i < 75; i++ {
 		go func() {
 			for {
 				attempts := 0
@@ -68,7 +70,9 @@ func (b *broadcaster) bWorkers(node *maelstrom.Node) {
 func (s *server) broadcastValues(b *broadcaster) {
 	for {
 		nodeID := s.node.ID()
+		s.topologyLock.RLock()
 		neighbors := s.topology[nodeID]
+		s.topologyLock.RUnlock()
 		if len(neighbors) == 0 {
 			// logger.Printf("No neighbors found for node: %s", nodeID)
 			continue
@@ -97,11 +101,11 @@ func (s *server) handleRead(msg maelstrom.Message) error {
 	logger.Printf("Read request received: %v", body)
 
 	ids := []float64{}
-	s.messageLock.Lock()
-	defer s.messageLock.Unlock()
+	s.messageLock.RLock()
 	for id := range s.broadcastData {
 		ids = append(ids, id)
 	}
+	s.messageLock.RUnlock()
 
 	return s.node.Reply(msg, map[string]any{"type": "read_ok", "messages": ids})
 }
@@ -118,12 +122,13 @@ func (s *server) handleBroadcast(msg maelstrom.Message) error {
 
 	logger.Printf("Broadcast request received: %v", body)
 	s.messageLock.Lock()
-	defer s.messageLock.Unlock()
 	if _, exists := s.broadcastData[body["message"].(float64)]; exists {
 		logger.Printf("Message already exists in local state")
+		s.messageLock.Unlock()
 		return nil
 	}
 	s.broadcastData[body["message"].(float64)] = struct{}{}
+	s.messageLock.Unlock()
 	s.pendingBroadcasts <- int(body["message"].(float64))
 
 	logger.Printf("Added message to local state")
@@ -136,7 +141,21 @@ func (s *server) handleTopology(msg maelstrom.Message) error {
 		return err
 	}
 
-	s.topology = t.Topology
+	idx := slices.IndexFunc(s.node.NodeIDs(), func(s string) bool { return s == "n0" })
+
+	s.topologyLock.Lock()
+	s.topology = map[string][]string{
+		"n0": append(s.node.NodeIDs()[:idx], s.node.NodeIDs()[idx+1:]...), // remove n0 from the list
+	}
+	for _, v := range s.node.NodeIDs() {
+		if v != "n0" {
+			s.topology[v] = []string{"n0"}
+		}
+	}
+	s.topologyLock.Unlock()
+
+	logger.Printf("Topology received: %v", s.topology)
+	// s.topology = t.Topology
 
 	return s.node.Reply(msg, map[string]any{"type": "topology_ok"})
 }
@@ -146,11 +165,11 @@ func main() {
 	s := &server{
 		node:              n,
 		topology:          map[string][]string{},
-		pendingBroadcasts: make(chan int, 500),
+		pendingBroadcasts: make(chan int, 400),
 		broadcastData:     map[float64]struct{}{},
 	}
 	b := &broadcaster{
-		broadcastChan: make(chan broadcastMsg, 500),
+		broadcastChan: make(chan broadcastMsg, 400),
 	}
 
 	n.Handle("broadcast", s.handleBroadcast)
