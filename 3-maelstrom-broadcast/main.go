@@ -15,7 +15,7 @@ import (
 type server struct {
 	node              *maelstrom.Node
 	topology          map[string][]string
-	pendingBroadcasts chan int
+	pendingBroadcasts chan broadcastMsg
 	broadcastData     map[float64]struct{}
 	// A mutex to lock the broadcastData map
 	messageLock  sync.RWMutex
@@ -29,31 +29,28 @@ type broadcaster struct {
 type broadcastMsg struct {
 	dst  string
 	body map[string]any
-}
-
-type topologyMessage struct {
-	Topology map[string][]string `json:"topology"`
+	src  string
 }
 
 var logger = log.New(os.Stderr, "", 0)
 
 func (b *broadcaster) bWorkers(node *maelstrom.Node) {
 	maxRetries := 100
-	for i := 0; i < 75; i++ {
+	for i := 0; i < 500; i++ {
 		go func() {
 			for {
 				attempts := 0
 				bmsg := <-b.broadcastChan
 				for {
 					logger.Printf("Sending broadcast message %v to: %s", bmsg.body, bmsg.dst)
-					ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(600))
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 					_, err := node.SyncRPC(ctx, bmsg.dst, bmsg.body)
 					cancel()
 					logger.Printf("err: %v", err)
 					if err != nil {
 						attempts++
 						if attempts < maxRetries {
-							time.Sleep(time.Duration(attempts) * time.Millisecond * time.Duration(400))
+							time.Sleep(time.Duration(attempts) * time.Second)
 							continue
 						} else {
 							logger.Printf("Max retries reached for message %v to: %s", bmsg.body, bmsg.dst)
@@ -78,16 +75,14 @@ func (s *server) broadcastValues(b *broadcaster) {
 			continue
 		}
 		logger.Printf("Waiting for pending broadcasts")
-		message := <-s.pendingBroadcasts
+		bMessage := <-s.pendingBroadcasts
 
 		for _, address := range neighbors {
-			b.broadcastChan <- broadcastMsg{
-				dst: address,
-				body: map[string]any{
-					"type":    "broadcast",
-					"message": message,
-				},
+			if bMessage.src == address {
+				continue
 			}
+			bMessage.dst = address
+			b.broadcastChan <- bMessage
 		}
 	}
 }
@@ -129,18 +124,20 @@ func (s *server) handleBroadcast(msg maelstrom.Message) error {
 	}
 	s.broadcastData[body["message"].(float64)] = struct{}{}
 	s.messageLock.Unlock()
-	s.pendingBroadcasts <- int(body["message"].(float64))
+
+	s.pendingBroadcasts <- broadcastMsg{
+		body: map[string]any{
+			"type":    "broadcast",
+			"message": int(body["message"].(float64)),
+		},
+		src: msg.Src,
+	}
 
 	logger.Printf("Added message to local state")
 	return nil
 }
 
 func (s *server) handleTopology(msg maelstrom.Message) error {
-	var t topologyMessage
-	if err := json.Unmarshal(msg.Body, &t); err != nil {
-		return err
-	}
-
 	idx := slices.IndexFunc(s.node.NodeIDs(), func(s string) bool { return s == "n0" })
 
 	s.topologyLock.Lock()
@@ -155,7 +152,6 @@ func (s *server) handleTopology(msg maelstrom.Message) error {
 	s.topologyLock.Unlock()
 
 	logger.Printf("Topology received: %v", s.topology)
-	// s.topology = t.Topology
 
 	return s.node.Reply(msg, map[string]any{"type": "topology_ok"})
 }
@@ -165,11 +161,11 @@ func main() {
 	s := &server{
 		node:              n,
 		topology:          map[string][]string{},
-		pendingBroadcasts: make(chan int, 400),
+		pendingBroadcasts: make(chan broadcastMsg, 1500),
 		broadcastData:     map[float64]struct{}{},
 	}
 	b := &broadcaster{
-		broadcastChan: make(chan broadcastMsg, 400),
+		broadcastChan: make(chan broadcastMsg, 1500),
 	}
 
 	n.Handle("broadcast", s.handleBroadcast)
